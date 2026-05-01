@@ -1,0 +1,6 @@
+{"transaction_id":"TXN001","account_id":"ACC001","transaction_date":"2024-01-20 10:30:00","amount":50.00,"transaction_type":"debit","description":"Grocery store"}
+{"transaction_id":"TXN002","account_id":"ACC001","transaction_date":"2024-01-21 14:45:00","amount":100.00,"transaction_type":"debit","description":"Gas station"}
+{"transaction_id":"TXN003","account_id":"ACC002","transaction_date":"2024-01-22 09:00:00","amount":500.00,"transaction_type":"credit","description":"Salary deposit"}
+{"transaction_id":"TXN004","account_id":"ACC003","transaction_date":"2024-02-25 16:20:00","amount":25.50,"transaction_type":"debit","description":"Coffee shop"}
+{"transaction_id":"TXN005","account_id":"ACC001","transaction_date":"2024-01-23 11:15:00","amount":200.00,"transaction_type":"debit","description":"Electric bill"}
+{"transaction_id":"TXN006","account_id":"ACC004","transaction_date":"2024-03-15 13:00:00","amount":1000.00,"transaction_type":"credit","description":"Transfer"}

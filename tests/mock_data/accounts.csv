@@ -1,0 +1,6 @@
+account_id,customer_id,account_type,balance,created_date
+ACC001,CUST001,checking,1000.00,2024-01-15
+ACC002,CUST001,savings,5000.50,2024-01-15
+ACC003,CUST002,checking,250.75,2024-02-20
+ACC004,CUST003,savings,10000.00,2024-03-10
+ACC005,CUST002,checking,1500.25,2024-04-05
