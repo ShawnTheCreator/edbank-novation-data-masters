@@ -447,10 +447,11 @@ Internal use only - Data Engineering Team
 ## Contact
 
 For questions or issues, contact the Data Engineering Team.
-#   P h a s e   1   C o m p l e t e  
- #   P h a s e   1   C o m p l e t e  
- #   P h a s e   2   C o m p l e t e  
- #   P h a s e   3   C o m p l e t e  
- #   P h a s e   4   C o m p l e t e  
- #   P h a s e   5   C o m p l e t e  
- 
+
+## Project Status
+
+- Phase 1 Complete
+- Phase 2 Complete
+- Phase 3 Complete
+- Phase 4 Complete
+- Phase 5 Complete
