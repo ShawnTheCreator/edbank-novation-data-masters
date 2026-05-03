@@ -45,11 +45,11 @@ RUN chmod -R 755 /app /data
 
 # Health check to verify pipeline components are ready
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python3 -c "import pipeline.utils; import pipeline.ingest; import pipeline.transform; import pipeline.provision; print('All modules loaded successfully')" || exit 1
+    CMD python3 -c "import pipeline.utils; import pipeline.ingest; import pipeline.transform; import pipeline.provision; import pipeline.validate; import pipeline.data_quality; print('All modules loaded successfully')" || exit 1
 
-# Default command runs the full pipeline in sequence
+# Default command runs the full pipeline in sequence, then validates
 # Can be overridden for specific layer execution
-CMD ["sh", "-c", "python3 -m pipeline.ingest && python3 -m pipeline.transform && python3 -m pipeline.provision"]
+CMD ["sh", "-c", "python3 -m pipeline.ingest && python3 -m pipeline.transform && python3 -m pipeline.provision && python3 -m pipeline.validate"]
 
 # Labels for documentation
 LABEL maintainer="Data Engineering Team" \

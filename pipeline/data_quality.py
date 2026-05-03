@@ -47,6 +47,9 @@ class CircuitBreaker:
         """
         Check null percentage in specified columns.
         
+        Uses single-pass aggregation to avoid multiple .count() calls.
+        Optimized for large datasets with 2GB RAM constraint.
+        
         Args:
             df: DataFrame to check
             dataset_name: Name of dataset for error messages
@@ -58,7 +61,30 @@ class CircuitBreaker:
         if columns is None:
             columns = df.columns
         
-        total_count = df.count()
+        # Single-pass: Get total count and filter in one aggregation
+        from pyspark.sql.functions import count, when, col as spark_col, isnan as spark_isnan
+        
+        # Build aggregation expressions for all columns at once
+        agg_exprs = [count("*").alias("total_count")]
+        
+        for column in columns:
+            if column not in df.columns:
+                continue
+            # Count nulls for this column
+            null_expr = count(
+                when(
+                    (spark_col(column).isNull()) | 
+                    (spark_isnan(spark_col(column))) |
+                    (spark_col(column) == ""),
+                    1
+                )
+            ).alias(f"{column}_nulls")
+            agg_exprs.append(null_expr)
+        
+        # Single aggregation pass
+        agg_result = df.agg(*agg_exprs).collect()[0]
+        
+        total_count = agg_result["total_count"]
         if total_count == 0:
             self.failed_checks.append(f"{dataset_name}: Dataset is empty (0 rows)")
             return False
@@ -69,13 +95,8 @@ class CircuitBreaker:
             if column not in df.columns:
                 continue
                 
-            null_count = df.filter(
-                (col(column).isNull()) | 
-                (isnan(col(column))) |
-                (col(column) == "")
-            ).count()
-            
-            null_percentage = null_count / total_count
+            null_count = agg_result[f"{column}_nulls"]
+            null_percentage = null_count / total_count if total_count > 0 else 0
             
             if null_percentage > self.max_null_percentage:
                 self.failed_checks.append(
@@ -122,6 +143,8 @@ class CircuitBreaker:
         """
         Check for duplicate primary keys.
         
+        Optimized single-pass aggregation using count + countDistinct.
+        
         Args:
             df: DataFrame to check
             dataset_name: Name of dataset for error messages
@@ -134,8 +157,15 @@ class CircuitBreaker:
             self.failed_checks.append(f"{dataset_name}: Primary key column '{primary_key}' not found")
             return False
         
-        total_count = df.count()
-        distinct_count = df.select(primary_key).distinct().count()
+        # Single-pass aggregation
+        from pyspark.sql.functions import count, countDistinct
+        agg_result = df.agg(
+            count("*").alias("total"),
+            countDistinct(primary_key).alias("distinct")
+        ).collect()[0]
+        
+        total_count = agg_result["total"]
+        distinct_count = agg_result["distinct"]
         
         if total_count != distinct_count:
             duplicates = total_count - distinct_count

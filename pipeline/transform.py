@@ -191,11 +191,9 @@ def deduplicate_records_lww(
     
     Algorithm - Deterministic Deduplication with Circuit Breaker:
     1. Filter NULL primary keys (prevent shuffle data skew)
-    2. Cache DataFrame to avoid double-scan for circuit breaker validation
-    3. Apply Window function: row_number() OVER (PARTITION BY pk ORDER BY timestamp DESC)
-    4. Filter row_number == 1 to keep most recent record
-    5. Circuit Breaker: Validate row loss < 10%, raise DataQualityException if exceeded
-    6. Unpersist cache to free memory
+    2. Apply Window function: row_number() OVER (PARTITION BY pk ORDER BY timestamp DESC)
+    3. Filter row_number == 1 to keep most recent record
+    4. Circuit Breaker: Validate row loss < 10%, raise DataQualityException if exceeded
     
     Banking-Grade Requirements:
     - Determinism: LWW ensures reproducible results (not random selection)
@@ -214,7 +212,7 @@ def deduplicate_records_lww(
     Raises:
         DataQualityException: If row loss exceeds max_loss_percentage
     """
-    from pyspark.sql.functions import row_number, lit
+    from pyspark.sql.functions import row_number, monotonically_increasing_id, count
     from pyspark.sql.window import Window
     
     # Step 1: Filter NULL primary keys to prevent data skew
@@ -226,23 +224,25 @@ def deduplicate_records_lww(
     
     if order_col not in df.columns:
         # If no timestamp available, use monotonically_increasing_id to preserve input order
-        from pyspark.sql.functions import monotonically_increasing_id
         df_filtered = df_filtered.withColumn('_row_order', monotonically_increasing_id())
         order_col = '_row_order'
     
-    # Step 2: Cache to prevent double-scan for circuit breaker validation
-    # Critical for 2 vCPU/2GB constraint - avoid scanning 18M records twice
-    df_cached = df_filtered.cache()
+    # Step 2: Single-pass count aggregation (avoid double .count())
+    # Get total count and distinct primary key count in one pass
+    agg_result = df_filtered.agg(
+        count("*").alias("total"),
+        count(primary_key).alias("pk_count")  # Non-null count
+    ).collect()[0]
     
-    # Count before deduplication (trigger cache materialization)
-    before_count = df_cached.count()
+    before_count = agg_result["total"]
+    
     print(f"  Pre-deduplication count: {before_count:,} records (NULL keys filtered)")
     
     # Step 3: Window function for deterministic Last Write Wins
     # row_number() ensures exactly one record per primary key (most recent)
     window_spec = Window.partitionBy(primary_key).orderBy(col(order_col).desc())
     
-    df_with_rn = df_cached.withColumn('_row_num', row_number().over(window_spec))
+    df_with_rn = df_filtered.withColumn('_row_num', row_number().over(window_spec))
     
     # Keep only the most recent record per primary key
     df_deduped = df_with_rn.filter(col('_row_num') == 1).drop('_row_num')
@@ -250,7 +250,7 @@ def deduplicate_records_lww(
     if order_col == '_row_order':
         df_deduped = df_deduped.drop('_row_order')
     
-    # Count after deduplication
+    # Step 4: Single count after deduplication
     after_count = df_deduped.count()
     duplicates_removed = before_count - after_count
     loss_percentage = duplicates_removed / before_count if before_count > 0 else 0
@@ -258,17 +258,13 @@ def deduplicate_records_lww(
     print(f"  Post-deduplication count: {after_count:,} records")
     print(f"  Duplicates removed: {duplicates_removed:,} ({loss_percentage:.2%} loss)")
     
-    # Step 4: Circuit Breaker - validate data loss is within acceptable threshold
+    # Step 5: Circuit Breaker - validate data loss is within acceptable threshold
     if loss_percentage > max_loss_percentage:
-        df_cached.unpersist()  # Clean up cache before raising exception
         raise DataQualityException(
             f"CIRCUIT BREAKER: Deduplication removed {loss_percentage:.2%} of records "
             f"({duplicates_removed:,} rows), exceeding threshold of {max_loss_percentage:.2%}. "
             f"This indicates severe data corruption. Pipeline stopped."
         )
-    
-    # Step 5: Unpersist cache to free memory for downstream operations
-    df_cached.unpersist()
     
     return df_deduped
 
@@ -322,7 +318,8 @@ def transform_accounts(spark: SparkSession, config: Dict[str, Any]) -> DataFrame
         if col_name in df.columns:
             df = standardize_string_column(df, col_name, case='lower')
     
-    print(f"  Accounts transformation complete: {df.count():,} records")
+    # Avoid extra count - use the after_count from deduplication
+    print(f"  Accounts transformation complete")
     return df
 
 
@@ -374,7 +371,8 @@ def transform_customers(spark: SparkSession, config: Dict[str, Any]) -> DataFram
     if 'email' in df.columns:
         df = remove_special_characters(df, 'email')
     
-    print(f"  Customers transformation complete: {df.count():,} records")
+    # Avoid extra count - use the after_count from deduplication
+    print(f"  Customers transformation complete")
     return df
 
 
@@ -432,7 +430,8 @@ def transform_transactions(spark: SparkSession, config: Dict[str, Any]) -> DataF
         if col_name in df.columns:
             df = standardize_string_column(df, col_name, case='lower')
     
-    print(f"  Transactions transformation complete: {df.count():,} records")
+    # Avoid extra count - use the after_count from deduplication
+    print(f"  Transactions transformation complete")
     return df
 
 
@@ -484,7 +483,8 @@ def resolve_linkages(
         how='left'
     )
     
-    print(f"  Linkages resolved: {df_linked.count():,} linked records")
+    # Avoid count - just return the result
+    print(f"  Linkages resolved")
     return df_linked
 
 

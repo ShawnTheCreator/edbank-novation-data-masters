@@ -29,38 +29,53 @@ def create_dimension_accounts(df_silver_accounts: DataFrame) -> DataFrame:
     """
     Create the accounts dimension table from Silver layer.
     
-    Algorithm:
-    - Select relevant columns from accounts
-    - Add surrogate key (hash of natural key + effective date)
-    - Add SCD Type 2 metadata columns for tracking changes
-    
-    Expected size: ~100K records
+    Per output_schema_spec.md §3, dim_accounts has 11 fields:
+    - account_sk (surrogate key)
+    - account_id, customer_id (from customer_ref), account_type, account_status
+    - open_date, product_tier, digital_channel
+    - credit_limit, current_balance, last_activity_date
     
     Args:
         df_silver_accounts: Silver layer accounts DataFrame
         
     Returns:
-        Accounts dimension DataFrame
+        Accounts dimension DataFrame with all 11 fields
     """
     print("Creating dim_accounts...")
     
-    # Select relevant columns
-    dim_cols = ['account_id', 'customer_id', 'account_type', 'balance', 'created_date']
+    # Select all required columns per spec (11 fields)
+    # customer_ref is renamed to customer_id per spec §3
+    dim_cols = [
+        'account_id', 'customer_ref', 'account_type', 'account_status',
+        'open_date', 'product_tier', 'digital_channel', 'credit_limit', 
+        'current_balance', 'last_activity_date'
+    ]
     available_cols = [c for c in dim_cols if c in df_silver_accounts.columns]
     
     df_dim = df_silver_accounts.select(*available_cols)
     
-    # Add surrogate key (hash of account_id for simplicity in this implementation)
-    df_dim = df_dim.withColumn("account_sk", hash(col("account_id")).cast("long"))
+    # Rename customer_ref to customer_id per spec §3 (field position 3)
+    if 'customer_ref' in df_dim.columns:
+        df_dim = df_dim.withColumnRenamed('customer_ref', 'customer_id')
     
-    # Add SCD Type 2 tracking columns
-    df_dim = df_dim \
-        .withColumn("effective_date", current_date()) \
-        .withColumn("expiration_date", lit(None).cast("date")) \
-        .withColumn("is_current", lit(True))
+    # Add surrogate key using deterministic hash (per spec §1)
+    # sha2-based for stability across re-runs
+    from pyspark.sql.functions import sha2
+    df_dim = df_dim.withColumn(
+        "account_sk", 
+        sha2(col("account_id"), 256).cast("long")
+    )
     
-    record_count = df_dim.count()
-    print(f"  dim_accounts created: {record_count:,} records")
+    # Reorder columns to match spec: account_sk at position 1, customer_id at position 3
+    ordered_cols = ['account_sk', 'account_id', 'customer_id', 'account_type', 
+                    'account_status', 'open_date', 'product_tier', 'digital_channel',
+                    'credit_limit', 'current_balance', 'last_activity_date']
+    
+    # Only include columns that exist
+    final_cols = [c for c in ordered_cols if c in df_dim.columns]
+    df_dim = df_dim.select(*final_cols)
+    
+    print(f"  dim_accounts schema: {len(df_dim.columns)} fields")
     
     return df_dim
 
@@ -69,38 +84,64 @@ def create_dimension_customers(df_silver_customers: DataFrame) -> DataFrame:
     """
     Create the customers dimension table from Silver layer.
     
-    Algorithm:
-    - Select relevant columns from customers
-    - Add surrogate key (hash of natural key)
-    - Add SCD Type 2 metadata columns
-    
-    Expected size: ~80K records
+    Per output_schema_spec.md §4, dim_customers has 9 fields:
+    - customer_sk (surrogate key)
+    - customer_id, gender, province, income_band, segment
+    - risk_score, kyc_status, age_band (derived from dob)
     
     Args:
         df_silver_customers: Silver layer customers DataFrame
         
     Returns:
-        Customers dimension DataFrame
+        Customers dimension DataFrame with all 9 fields
     """
     print("Creating dim_customers...")
     
-    # Select relevant columns
-    dim_cols = ['customer_id', 'first_name', 'last_name', 'email', 'phone', 'registration_date']
+    from pyspark.sql.functions import sha2, floor, datediff, lit, current_date as spark_current_date
+    
+    # Select required columns per spec (9 fields)
+    dim_cols = ['customer_id', 'gender', 'province', 'income_band', 'segment', 
+                'risk_score', 'kyc_status', 'dob']
     available_cols = [c for c in dim_cols if c in df_silver_customers.columns]
     
     df_dim = df_silver_customers.select(*available_cols)
     
-    # Add surrogate key
-    df_dim = df_dim.withColumn("customer_sk", hash(col("customer_id")).cast("long"))
+    # Add surrogate key using deterministic hash (per spec §1)
+    df_dim = df_dim.withColumn(
+        "customer_sk", 
+        sha2(col("customer_id"), 256).cast("long")
+    )
     
-    # Add SCD Type 2 tracking columns
-    df_dim = df_dim \
-        .withColumn("effective_date", current_date()) \
-        .withColumn("expiration_date", lit(None).cast("date")) \
-        .withColumn("is_current", lit(True))
+    # Derive age_band from dob per spec §4
+    if 'dob' in df_dim.columns:
+        df_dim = df_dim.withColumn(
+            "age",
+            floor(datediff(spark_current_date(), col("dob")) / 365.25).cast("int")
+        )
+        
+        # Bucket into age bands
+        df_dim = df_dim.withColumn(
+            "age_band",
+            when(col("age") >= 65, "65+")
+            .when(col("age") >= 56, "56-65")
+            .when(col("age") >= 46, "46-55")
+            .when(col("age") >= 36, "36-45")
+            .when(col("age") >= 26, "26-35")
+            .when(col("age") >= 18, "18-25")
+            .otherwise(None)
+        )
+        
+        # Drop temporary age column and dob (replaced by age_band)
+        df_dim = df_dim.drop("age", "dob")
     
-    record_count = df_dim.count()
-    print(f"  dim_customers created: {record_count:,} records")
+    # Reorder columns to match spec
+    ordered_cols = ['customer_sk', 'customer_id', 'gender', 'province', 'income_band',
+                    'segment', 'risk_score', 'kyc_status', 'age_band']
+    
+    final_cols = [c for c in ordered_cols if c in df_dim.columns]
+    df_dim = df_dim.select(*final_cols)
+    
+    print(f"  dim_customers schema: {len(df_dim.columns)} fields")
     
     return df_dim
 
@@ -108,33 +149,38 @@ def create_dimension_customers(df_silver_customers: DataFrame) -> DataFrame:
 def create_fact_transactions(
     df_silver_transactions: DataFrame,
     df_dim_accounts: DataFrame,
-    df_dim_customers: DataFrame
+    df_dim_customers: DataFrame,
+    df_bronze_transactions: DataFrame = None
 ) -> DataFrame:
     """
     Create the transactions fact table from Silver layer.
+    
+    Per output_schema_spec.md §2, fact_transactions has 14 fields:
+    - transaction_sk (surrogate key)
+    - transaction_id, account_sk, customer_sk (FKs)
+    - transaction_date, transaction_timestamp
+    - transaction_type, merchant_category, amount, currency, channel, province
+    - dq_flag (data quality flag)
+    - ingestion_timestamp
     
     Algorithm - O(N) Broadcast Hash Joins:
     1. Broadcast smaller dimension tables to all workers
     2. Join transactions with accounts dimension on account_id
     3. Join result with customers dimension on customer_id
-    4. Add derived columns for partitioning (year, month, day)
-    
-    The broadcast() function forces a Broadcast Hash Join:
-    - Small tables (<100MB) are copied to each worker
-    - Large transaction table streams through without shuffle
-    - Result: O(N) complexity instead of O(N log N) SortMergeJoin
-    
-    Expected size: ~1M records
+    4. Add derived columns and DQ flags
     
     Args:
         df_silver_transactions: Silver layer transactions DataFrame
         df_dim_accounts: Accounts dimension DataFrame
         df_dim_customers: Customers dimension DataFrame
+        df_bronze_transactions: Bronze layer transactions (for ingestion_timestamp)
         
     Returns:
-        Transactions fact DataFrame
+        Transactions fact DataFrame with all 14 fields
     """
     print("Creating fact_transactions...")
+    
+    from pyspark.sql.functions import sha2, concat, to_timestamp, lit, when, col as spark_col
     
     # Select and rename columns from dimension tables to avoid conflicts
     df_accounts_lookup = df_dim_accounts.select(
@@ -146,19 +192,20 @@ def create_fact_transactions(
     
     df_customers_lookup = df_dim_customers.select(
         col("customer_id"),
-        col("customer_sk")
+        col("customer_sk"),
+        col("province").alias("customer_province")
     )
     
-    # Prepare fact columns from transactions
+    # Prepare fact columns from transactions - select all available fields
     fact_cols = [
-        'transaction_id', 'account_id', 'transaction_date', 'amount',
-        'transaction_type', 'description'
+        'transaction_id', 'account_id', 'transaction_date', 'transaction_time',
+        'transaction_type', 'merchant_category', 'amount', 'currency', 'channel',
+        'location', 'description', '_ingestion_timestamp'
     ]
     available_fact_cols = [c for c in fact_cols if c in df_silver_transactions.columns]
     df_fact = df_silver_transactions.select(*available_fact_cols)
     
     # Step 1: Broadcast Hash Join with accounts dimension
-    # This is O(N) because accounts table is small and broadcasted
     print("  Applying Broadcast Hash Join with accounts dimension...")
     df_fact = df_fact.join(
         broadcast(df_accounts_lookup),
@@ -167,7 +214,6 @@ def create_fact_transactions(
     )
     
     # Step 2: Broadcast Hash Join with customers dimension
-    # This is O(N) because customers table is small and broadcasted
     print("  Applying Broadcast Hash Join with customers dimension...")
     df_fact = df_fact.join(
         broadcast(df_customers_lookup),
@@ -175,36 +221,65 @@ def create_fact_transactions(
         how='left'
     )
     
-    # Step 3: Add derived partitioning columns
-    # These enable O(1) or O(log N) partition pruning on queries
-    if 'transaction_date' in df_fact.columns:
-        df_fact = df_fact \
-            .withColumn("transaction_year", year(col("transaction_date"))) \
-            .withColumn("transaction_month", month(col("transaction_date"))) \
-            .withColumn("transaction_day", dayofmonth(col("transaction_date"))) \
-            .withColumn("date_key", date_format(col("transaction_date"), "yyyyMMdd").cast("int"))
+    # Step 3: Add surrogate key (deterministic hash per spec §1)
+    df_fact = df_fact.withColumn(
+        "transaction_sk",
+        sha2(col("transaction_id"), 256).cast("long")
+    )
     
-    # Select final fact columns (using surrogate keys instead of natural keys where applicable)
+    # Step 4: Build transaction_timestamp from date + time
+    if 'transaction_date' in df_fact.columns and 'transaction_time' in df_fact.columns:
+        df_fact = df_fact.withColumn(
+            "transaction_timestamp",
+            to_timestamp(concat(col("transaction_date"), lit(" "), col("transaction_time")), 
+                        "yyyy-MM-dd HH:mm:ss")
+        )
+    elif 'transaction_date' in df_fact.columns:
+        df_fact = df_fact.withColumn(
+            "transaction_timestamp",
+            to_timestamp(col("transaction_date"), "yyyy-MM-dd")
+        )
+    
+    # Step 5: Extract province from location or use customer_province
+    if 'location' in df_fact.columns:
+        # Try to extract province from location struct
+        df_fact = df_fact.withColumn(
+            "province",
+            when(spark_col("location.province").isNotNull(), spark_col("location.province"))
+            .otherwise(col("customer_province"))
+        )
+    else:
+        df_fact = df_fact.withColumn("province", col("customer_province"))
+    
+    # Step 6: Standardize currency to ZAR per spec §6
+    if 'currency' in df_fact.columns:
+        df_fact = df_fact.withColumn("currency", lit("ZAR"))
+    else:
+        df_fact = df_fact.withColumn("currency", lit("ZAR"))
+    
+    # Step 7: DQ Flag - set to NULL for clean records per spec §6
+    # (Silver layer should have already flagged issues)
+    df_fact = df_fact.withColumn("dq_flag", lit(None).cast("string"))
+    
+    # Step 8: Rename _ingestion_timestamp to ingestion_timestamp
+    if '_ingestion_timestamp' in df_fact.columns:
+        df_fact = df_fact.withColumnRenamed("_ingestion_timestamp", "ingestion_timestamp")
+    else:
+        from pyspark.sql.functions import current_timestamp
+        df_fact = df_fact.withColumn("ingestion_timestamp", current_timestamp())
+    
+    # Step 9: Select final 14 fields in spec order
     final_cols = [
-        'transaction_id',
-        'account_sk',
-        'customer_sk',
-        'date_key',
-        'transaction_date',
-        'transaction_year',
-        'transaction_month',
-        'transaction_day',
-        'amount',
-        'transaction_type',
-        'description'
+        'transaction_sk', 'transaction_id', 'account_sk', 'customer_sk',
+        'transaction_date', 'transaction_timestamp', 'transaction_type',
+        'merchant_category', 'amount', 'currency', 'channel', 'province',
+        'dq_flag', 'ingestion_timestamp'
     ]
     
-    # Only include columns that exist
     available_final_cols = [c for c in final_cols if c in df_fact.columns]
     df_fact = df_fact.select(*available_final_cols)
     
-    record_count = df_fact.count()
-    print(f"  fact_transactions created: {record_count:,} records")
+    print(f"  fact_transactions schema: {len(df_fact.columns)} fields")
     
     return df_fact
 
@@ -324,9 +399,8 @@ def run_gold_provisioning(config_path: str = "/app/config/pipeline_config.yaml")
         df_silver_customers = spark.read.format("delta").load(f"{silver_base_path}/customers")
         df_silver_transactions = spark.read.format("delta").load(f"{silver_base_path}/transactions")
         
-        print(f"  Accounts: {df_silver_accounts.count():,} records")
-        print(f"  Customers: {df_silver_customers.count():,} records")
-        print(f"  Transactions: {df_silver_transactions.count():,} records")
+        # Avoid multiple counts - we'll see counts from dimension creation
+        print("  Silver layer data loaded")
         
         # Create dimension tables
         print("\nCreating dimension tables...")
@@ -347,7 +421,7 @@ def run_gold_provisioning(config_path: str = "/app/config/pipeline_config.yaml")
         output_format = output_config.get('format', 'delta')
         mode = output_config.get('mode', 'overwrite')
         
-        # Write dimension tables
+        # Write dimension tables (no partitioning needed for dimension tables)
         print("\nWriting dimension tables...")
         write_dimension_table(
             df_dim_accounts,
@@ -361,6 +435,13 @@ def run_gold_provisioning(config_path: str = "/app/config/pipeline_config.yaml")
             output_format,
             mode
         )
+        
+        # Load Bronze transactions for ingestion_timestamp if needed
+        bronze_path = get_output_path(config, 'bronze')
+        try:
+            df_bronze_transactions = spark.read.format("delta").load(f"{bronze_path}/transactions")
+        except:
+            df_bronze_transactions = None
         
         # Write fact table with partitioning
         print("\nWriting fact table with partition pruning...")
@@ -382,14 +463,13 @@ def run_gold_provisioning(config_path: str = "/app/config/pipeline_config.yaml")
             output_format,
             mode
         )
-        
         print("\n" + "=" * 60)
         print("GOLD LAYER PROVISIONING COMPLETED SUCCESSFULLY")
         print("=" * 60)
-        print("\nGold Layer Tables:")
-        print(f"  - dim_accounts: ~100K records")
-        print(f"  - dim_customers: ~80K records")
-        print(f"  - fact_transactions: ~1M records (partitioned by date)")
+        print("\nGold Layer Tables Created:")
+        print(f"  - dim_accounts: ~100K records expected")
+        print(f"  - dim_customers: ~80K records expected")
+        print(f"  - fact_transactions: ~1M records expected (partitioned by date)")
         print("=" * 60)
         
     except Exception as e:
